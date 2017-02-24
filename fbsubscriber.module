@@ -1,1 +1,302 @@
 <?php
+
+define("APP_ID", '1262285140507519');
+define("APP_SECRET",'9bd9614cef9c9fc45258775500e42c4a');
+define("GRAPH_VERSION",'v2.8');
+
+if(!session_id()) {
+    session_start();
+}
+
+// include FB PHP library
+$path = function_exists('libraries_get_path') ? libraries_get_path('php-graph-sdk') : 'sites/all/libraries/php-graph-sdk';
+if (!include($path . '/vendor/autoload.php')) {
+}
+  
+function fbsubscriber_menu() {
+    $items = array();
+/*    
+        $items['admin/config/services/affilinet'] = array(
+        'title' => t('affili.net'),
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('affilinet_admin_config_form'),  
+        'access arguments' => array('administer site configuration'),
+        'type' => MENU_CALLBACK,
+    );
+*/
+
+    $items['fb-callback/%'] = array(
+        'title' => t('FB Callback'),
+        'access arguments' => array('access content'),
+        'page arguments' => array(1),  
+        'page callback' => 'fbsubscriber_callback',
+    );
+    
+    $items['go/%'] = array(
+        'title' => t('Go'),
+        'access arguments' => array('access content'),
+        'page arguments' => array(1),  
+        'page callback' => 'fbsubscriber_go',
+    );
+        
+    return $items;
+}
+
+function fbsubscriber_go($nid){
+    if(!session_id()) {
+        session_start();
+    }  
+    $link = fbsubscriber_login($nid);
+    drupal_goto($link);    
+}
+
+function fbsubscriber_login($nid){
+    
+    if(!session_id()) {
+        session_start();
+    }
+    
+    $fb = new Facebook\Facebook([
+      'app_id' => APP_ID,
+      'app_secret' => APP_SECRET,
+      'default_graph_version' => GRAPH_VERSION,
+      'persistent_data_handler'=>'session'
+      ]);
+    
+    $helper = $fb->getRedirectLoginHelper();
+    
+    $permissions = ['public_profile','email']; // Optional permissions
+    $loginUrl = $helper->getLoginUrl('http://1clicksubscriber.com/fb-callback/'.$nid, $permissions);
+    
+    return $loginUrl;
+}
+
+
+function fbsubscriber_callback($nid){
+    if(!session_id()) {
+        session_start();
+    }
+    $fb = new Facebook\Facebook([
+      'app_id' => APP_ID,
+      'app_secret' => APP_SECRET,
+      'default_graph_version' => GRAPH_VERSION,
+      'persistent_data_handler'=>'session'
+      ]);
+    
+    $helper = $fb->getRedirectLoginHelper();
+    //$_SESSION['FBRLH_state']=$_GET['state'];
+    
+    try {
+      $accessToken = $helper->getAccessToken();
+    } catch(Facebook\Exceptions\FacebookResponseException $e) {
+      // When Graph returns an error
+      echo 'Graph returned an error: ' . $e->getMessage();
+      exit;
+    } catch(Facebook\Exceptions\FacebookSDKException $e) {
+      // When validation fails or other local issues
+      echo 'Facebook SDK returned an error: ' . $e->getMessage();
+      exit;
+    }
+    
+    if (! isset($accessToken)) {
+      if ($helper->getError()) {
+        header('HTTP/1.0 401 Unauthorized');
+        echo "Error: " . $helper->getError() . "\n";
+        echo "Error Code: " . $helper->getErrorCode() . "\n";
+        echo "Error Reason: " . $helper->getErrorReason() . "\n";
+        echo "Error Description: " . $helper->getErrorDescription() . "\n";
+      } else {
+        header('HTTP/1.0 400 Bad Request');
+        echo 'Bad request';
+      }
+      exit;
+    }
+    
+    // Logged in
+    //echo '<h3>Access Token</h3>';
+    //var_dump($accessToken->getValue());
+    
+    // The OAuth 2.0 client handler helps us manage access tokens
+    $oAuth2Client = $fb->getOAuth2Client();
+    
+    // Get the access token metadata from /debug_token
+    $tokenMetadata = $oAuth2Client->debugToken($accessToken);
+    //echo '<h3>Metadata</h3>';
+    //var_dump($tokenMetadata);
+    
+    // Validation (these will throw FacebookSDKException's when they fail)
+    $tokenMetadata->validateAppId(APP_ID);
+    // If you know the user ID this access token belongs to, you can validate it here
+    //$tokenMetadata->validateUserId('123');
+    $tokenMetadata->validateExpiration();
+    
+    if (! $accessToken->isLongLived()) {
+      // Exchanges a short-lived access token for a long-lived one
+      try {
+        $accessToken = $oAuth2Client->getLongLivedAccessToken($accessToken);
+      } catch (Facebook\Exceptions\FacebookSDKException $e) {
+        echo "<p>Error getting long-lived access token: " . $e->getMessage() . "</p>\n\n";
+        exit;
+      }
+    
+      echo '<h3>Long-lived</h3>';
+      var_dump($accessToken->getValue());
+    }
+    
+    $_SESSION['fb_access_token'] = (string) $accessToken;
+    
+    // User is logged in with a long-lived access token.
+    // You can redirect them to a members-only page.
+    //header('Location: https://example.com/members.php');
+    
+    try {
+      // Returns a `Facebook\FacebookResponse` object
+      $response = $fb->get('/me?fields=first_name,last_name,email,gender,locale,link,id', $accessToken);
+    } catch(Facebook\Exceptions\FacebookResponseException $e) {
+      echo 'Graph returned an error: ' . $e->getMessage();
+      exit;
+    } catch(Facebook\Exceptions\FacebookSDKException $e) {
+      echo 'Facebook SDK returned an error: ' . $e->getMessage();
+      exit;
+    }
+    
+    $user = $response->getGraphUser();
+
+    $node = node_load($nid);
+    $listid = $node->field_listid['und'][0]['value'];
+    $tags = $node->field_listtags['und'][0]['value'];
+    $redirect = $node->field_redirect['und'][0]['value'];
+
+    $output = fbsubscriber_ac_contact_add($listid, $user['email'], $user['first_name'], $user['last_name'], $tags);
+    
+    drupal_goto($redirect);
+
+}
+
+function fbsubscriber_ac_contact_add($listid,$email,$first_name,$last_name,$tags){
+    // By default, this sample code is designed to get the result from your ActiveCampaign installation and print out the result
+    $url = 'https://erfolgsstudio.api-us1.com';
+    
+    
+    $params = array(
+    
+        // the API Key can be found on the "Your Settings" page under the "API" tab.
+        // replace this with your API Key
+        'api_key'      => 'a5b148594a152c83b496a2e69169087298f0652383886014e4b97c273abadc9b54601e85',
+    
+        // this is the action that adds a contact
+        'api_action'   => 'contact_sync',
+    
+        // define the type of output you wish to get back
+        // possible values:
+        // - 'xml'  :      you have to write your own XML parser
+        // - 'json' :      data is returned in JSON format and can be decoded with
+        //                 json_decode() function (included in PHP since 5.2.0)
+        // - 'serialize' : data is returned in a serialized format and can be decoded with
+        //                 a native unserialize() function
+        'api_output'   => 'serialize',
+    );
+    
+    // here we define the data we are posting in order to perform an update
+    $post = array(
+        'email'                    => $email,
+        'first_name'               => $first_name,
+        'last_name'                => $last_name,
+        'tags'                     => $tags,
+        //'ip4'                    => '127.0.0.1',
+    
+        // any custom fields
+        //'field[345,0]'           => 'field value', // where 345 is the field ID
+        //'field[%PERS_1%,0]'      => 'field value', // using the personalization tag instead (make sure to encode the key)
+    
+        // assign to lists:
+        'p[$listid]'                   => $listid, // example list ID (REPLACE '123' WITH ACTUAL LIST ID, IE: p[5] = 5)
+        'status[$listid]'              => 1, // 1: active, 2: unsubscribed (REPLACE '123' WITH ACTUAL LIST ID, IE: status[5] = 1)
+        //'form'          => 1001, // Subscription Form ID, to inherit those redirection settings
+        //'noresponders[$listid]'      => 1, // uncomment to set "do not send any future responders"
+        //'sdate[$listid]'             => '2009-12-07 06:00:00', // Subscribe date for particular list - leave out to use current date/time
+        // use the folowing only if status=1
+        'instantresponders[$listid]' => 1, // set to 0 to if you don't want to sent instant autoresponders
+        //'lastmessage[$listid]'       => 1, // uncomment to set "send the last broadcast campaign"
+    
+        //'p[]'                    => 345, // some additional lists?
+        //'status[$listid]'            => 1, // some additional lists?
+    );
+    
+    // This section takes the input fields and converts them to the proper format
+    $query = "";
+    foreach( $params as $key => $value ) $query .= urlencode($key) . '=' . urlencode($value) . '&';
+    $query = rtrim($query, '& ');
+    
+    // This section takes the input data and converts it to the proper format
+    $data = "";
+    foreach( $post as $key => $value ) $data .= urlencode($key) . '=' . urlencode($value) . '&';
+    $data = rtrim($data, '& ');
+    
+    // clean up the url
+    $url = rtrim($url, '/ ');
+    
+    // This sample code uses the CURL library for php to establish a connection,
+    // submit your request, and show (print out) the response.
+    if ( !function_exists('curl_init') ) return('CURL not supported. (introduced in PHP 4.0.2)');
+    
+    // If JSON is used, check if json_decode is present (PHP 5.2.0+)
+    if ( $params['api_output'] == 'json' && !function_exists('json_decode') ) {
+        return('JSON not supported. (introduced in PHP 5.2.0)');
+    }
+    
+    // define a final API request - GET
+    $api = $url . '/admin/api.php?' . $query;
+    
+    $request = curl_init($api); // initiate curl object
+    curl_setopt($request, CURLOPT_HEADER, 0); // set to 0 to eliminate header info from response
+    curl_setopt($request, CURLOPT_RETURNTRANSFER, 1); // Returns response data instead of TRUE(1)
+    curl_setopt($request, CURLOPT_POSTFIELDS, $data); // use HTTP POST to send form data
+    //curl_setopt($request, CURLOPT_SSL_VERIFYPEER, FALSE); // uncomment if you get no gateway response and are using HTTPS
+    //curl_setopt($request, CURLOPT_FOLLOWLOCATION, true);
+    
+    $response = (string)curl_exec($request); // execute curl post and store results in $response
+    
+    // additional options may be required depending upon your server configuration
+    // you can find documentation on curl options at http://www.php.net/curl_setopt
+    curl_close($request); // close curl object
+    
+    if ( !$response ) {
+        return('Nothing was returned. Do you have a connection to Email Marketing server?');
+    }
+    
+    // This line takes the response and breaks it into an array using:
+    // JSON decoder
+    //$result = json_decode($response);
+    // unserializer
+    $result = unserialize($response);
+    // XML parser...
+    // ...
+    
+    // Result info that is always returned
+    $output = 'Result: ' . ( $result['result_code'] ? 'SUCCESS' : 'FAILED' ) . '<br />';
+    $output .= 'Message: ' . $result['result_message'] . '<br />';
+/*    
+    // The entire result printed out
+    $output .= 'The entire result printed out:<br />';
+    $output .= '<pre>';
+    print_r($result);
+    $output .= '</pre>';
+    
+    // Raw response printed out
+    $output .= 'Raw response printed out:<br />';
+    $output .= '<pre>';
+    print_r($response);
+    $output .= '</pre>';
+    
+    // API URL that returned the result
+    $output .= 'API URL that returned the result:<br />';
+    $output .= $api;
+    
+    $output .= '<br /><br />POST params:<br />';
+    $output .= '<pre>';
+    print_r($post);
+    $output .= '</pre>';
+*/    
+    return $output;
+}
