@@ -4,15 +4,30 @@ define("APP_ID", '1262285140507519');
 define("APP_SECRET",'9bd9614cef9c9fc45258775500e42c4a');
 define("GRAPH_VERSION",'v2.8');
 
-if(!session_id()) {
-    session_start();
-}
-
 // include FB PHP library
 $path = function_exists('libraries_get_path') ? libraries_get_path('php-graph-sdk') : 'sites/all/libraries/php-graph-sdk';
 if (!include($path . '/vendor/autoload.php')) {
 }
-  
+
+// include Mailchimp PHP library
+$path = function_exists('libraries_get_path') ? libraries_get_path('activecampaign-api') : 'sites/all/libraries/activecampaign-api';
+require_once($path . '/vendor/autoload.php');
+
+// include Mailchimp PHP library
+$path = function_exists('libraries_get_path') ? libraries_get_path('mailchimp-api') : 'sites/all/libraries/mailchimp-api';
+require_once($path . '/src/MailChimp.php');
+use \DrewM\MailChimp\MailChimp;
+
+
+function fbsubscriber_permission() {
+  return array(
+    'access fbsubscriber' => array(
+      'title' => t('Access fbsubscriber'),
+    ),
+  );
+}
+
+
 function fbsubscriber_menu() {
     $items = array();
 /*    
@@ -24,6 +39,13 @@ function fbsubscriber_menu() {
         'type' => MENU_CALLBACK,
     );
 */
+
+   $items['mailsystems'] = array(
+        'title' => t('Mailsystems Configuration'),
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('fbsubscriber_mailsystems_form'),  
+        'access arguments' => array('access fbsubscriber'),
+    );
 
     $items['fb-callback/%'] = array(
         'title' => t('FB Callback'),
@@ -38,34 +60,54 @@ function fbsubscriber_menu() {
         'page arguments' => array(1),  
         'page callback' => 'fbsubscriber_go',
     );
-        
+          
+    $items['actest'] = array(
+        'title' => t('AC Account'),
+        'access arguments' => array('access content'),
+        'page arguments' => array(0),  
+        'page callback' => 'fbsubscriber_mc_get_lists',
+    );          
+          
+  $items['dropdown'] = array(
+    'title' => t('Mailsystem'),
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('fbsubscriber_example_dependent_dropdown'),
+    'access callback' => TRUE,
+  );
+            
     return $items;
 }
 
 function fbsubscriber_go($nid){
-    if(!session_id()) {
-        session_start();
-    }  
+if (!isset($_SESSION['go'])) {
+    // Start session
+    session_start();
+    $_SESSION['go'] = 1;
+}
+
+    db_insert('fbsubscriber_login')
+    ->fields(array(
+    'nid' => $nid,
+    'datetime' => date("Y-m-d H:i:s", time()),
+    'sessionID' => session_id(),
+    ))->execute();
+    
     $link = fbsubscriber_login($nid);
     drupal_goto($link);    
 }
 
 function fbsubscriber_login($nid){
-    
-    if(!session_id()) {
-        session_start();
-    }
-    
-    $fb = new Facebook\Facebook([
+
+    $fb = new Facebook\Facebook(array(
       'app_id' => APP_ID,
       'app_secret' => APP_SECRET,
       'default_graph_version' => GRAPH_VERSION,
       'persistent_data_handler'=>'session'
-      ]);
+      ));
     
     $helper = $fb->getRedirectLoginHelper();
     
-    $permissions = ['public_profile','email']; // Optional permissions
+    $permissions = array('public_profile','email'); // Optional permissions
     $loginUrl = $helper->getLoginUrl('http://1clicksubscriber.com/fb-callback/'.$nid, $permissions);
     
     return $loginUrl;
@@ -73,15 +115,18 @@ function fbsubscriber_login($nid){
 
 
 function fbsubscriber_callback($nid){
-    if(!session_id()) {
-        session_start();
-    }
-    $fb = new Facebook\Facebook([
+if (!isset($_SESSION['go'])) {
+    // Start session
+    session_start();
+    $_SESSION['go'] = 1;
+}
+
+    $fb = new Facebook\Facebook(array(
       'app_id' => APP_ID,
       'app_secret' => APP_SECRET,
       'default_graph_version' => GRAPH_VERSION,
       'persistent_data_handler'=>'session'
-      ]);
+      ));
     
     $helper = $fb->getRedirectLoginHelper();
     //$_SESSION['FBRLH_state']=$_GET['state'];
@@ -163,37 +208,52 @@ function fbsubscriber_callback($nid){
     $user = $response->getGraphUser();
 
     $node = node_load($nid);
+    $uid = $node->uid;
     $listid = $node->field_listid['und'][0]['value'];
-    $tags = $node->field_listtags['und'][0]['value'];
+    if (isset($node->field_listtags['und'][0]['value'])) {$tags = $node->field_listtags['und'][0]['value'];}
     $redirect = $node->field_redirect['und'][0]['value'];
-
-    $output = fbsubscriber_ac_contact_add($listid, $user['email'], $user['first_name'], $user['last_name'], $tags);
+    $term = taxonomy_term_load($node->field_mailsystem['und'][0]['tid']);
+    $mailsystem = $term->name;
     
+    $ip = $_SERVER['REMOTE_ADDR'];
+
+    db_insert('fbsubscriber_callback')
+    ->fields(array(
+    'nid' => $nid,
+    'datetime' => date("Y-m-d H:i:s", time()),
+    'sessionID' => session_id(),
+    'first_name' => $user['first_name'], 
+    'last_name' => $user['last_name'],
+    'email' => $user['email'],
+    'gender' => $user['gender'],
+    'locale' => $user['locale'],
+    'fbID' => $user['id'],
+    'ip' => $ip,
+    ))->execute();
+    
+
+    switch ($mailsystem){
+        case 'Activecampaign':
+            $output = fbsubscriber_ac_contact_add($uid, $listid, $user['email'], $user['first_name'], $user['last_name'], $tags, $ip);
+            break;
+        case 'Mailchimp':
+            $output = fbsubscriber_mc_contact_add($uid, $listid, $user['email'], $user['first_name'], $user['last_name'], $user['locale'], $ip);
+            break;
+    }
+
     drupal_goto($redirect);
+    //return $output;
 
 }
 
-function fbsubscriber_ac_contact_add($listid,$email,$first_name,$last_name,$tags){
-    // By default, this sample code is designed to get the result from your ActiveCampaign installation and print out the result
-    $url = 'https://erfolgsstudio.api-us1.com';
+function fbsubscriber_ac_contact_add($uid,$listid,$email,$first_name,$last_name,$tags,$ip){
+
+    $systems = db_query("SELECT * FROM {fbsubscriber_mailsystem} WHERE uid='" . $uid . "'")->fetchAssoc();
+    $url = $systems['ac_url'];
     
-    
-    $params = array(
-    
-        // the API Key can be found on the "Your Settings" page under the "API" tab.
-        // replace this with your API Key
-        'api_key'      => 'a5b148594a152c83b496a2e69169087298f0652383886014e4b97c273abadc9b54601e85',
-    
-        // this is the action that adds a contact
+    $params = array(    
+        'api_key'      => $systems['ac_api_key'],
         'api_action'   => 'contact_sync',
-    
-        // define the type of output you wish to get back
-        // possible values:
-        // - 'xml'  :      you have to write your own XML parser
-        // - 'json' :      data is returned in JSON format and can be decoded with
-        //                 json_decode() function (included in PHP since 5.2.0)
-        // - 'serialize' : data is returned in a serialized format and can be decoded with
-        //                 a native unserialize() function
         'api_output'   => 'serialize',
     );
     
@@ -203,7 +263,7 @@ function fbsubscriber_ac_contact_add($listid,$email,$first_name,$last_name,$tags
         'first_name'               => $first_name,
         'last_name'                => $last_name,
         'tags'                     => $tags,
-        //'ip4'                    => '127.0.0.1',
+        'ip4'                      => $ip,
     
         // any custom fields
         //'field[345,0]'           => 'field value', // where 345 is the field ID
@@ -299,4 +359,245 @@ function fbsubscriber_ac_contact_add($listid,$email,$first_name,$last_name,$tags
     $output .= '</pre>';
 */    
     return $output;
+}
+
+function fbsubscriber_mc_contact_add($uid,$listid,$email,$first_name,$last_name,$language,$ip){
+
+    $systems = db_query("SELECT * FROM {fbsubscriber_mailsystem} WHERE uid='" . $uid . "'")->fetchAssoc();
+    $MailChimp = new MailChimp($systems['mc_api_key']);
+    
+    $result = $MailChimp->post("lists/$listid/members", array(
+            'email_address' => $email,
+            'status'        => 'subscribed',
+        ));
+
+    $subscriber_hash = $MailChimp->subscriberHash($email);
+    $result = $MailChimp->patch("lists/$listid/members/$subscriber_hash", array(
+            'merge_fields' => array('FNAME'=>$first_name, 'LNAME'=>$last_name),
+            'ip_signup' => $ip,
+            'ip_opt' => $ip,
+            'language' => substr($language,0,2),
+            'timestamp_signup' => date("Y-m-d H:i:s", time()),
+    ));
+
+                
+    return $result;
+}
+
+function fbsubscriber_ac_get_lists() {
+global $user;
+    $mailsystem = db_query("SELECT * FROM {fbsubscriber_mailsystem} WHERE uid='" . $user->uid . "'")->fetchAssoc();
+    $ac = new ActiveCampaign($mailsystem['ac_url'], $mailsystem['ac_api_key']);
+    $lists = $ac->api("list/list?ids=all");
+   
+   $list=array();
+    $i = 0;
+    while (isset($lists->$i->id)) {
+        $list[$i]['id'] = $lists->$i->id;
+        $list[$i]['name'] = $lists->$i->name;
+        $i++;
+    }
+    return $list;
+}
+
+function fbsubscriber_mc_get_lists() {
+global $user;
+
+    $mc = db_query("SELECT mc_api_key FROM {fbsubscriber_mailsystem} WHERE uid='" . $user->uid . "'")->fetchAssoc();
+    $MailChimp = new MailChimp($mc['mc_api_key']);
+    $result = $MailChimp->get('lists');
+    $lists = array();
+    $i = 0;
+    foreach ($result['lists'] as $list) {
+        $lists[$i]['id'] = $list['id'];
+        $lists[$i]['name'] = $list['name'];
+        $i++;
+    }
+
+    return $lists;
+}
+
+function fbsubscriber_mailsystems_form($form,&$form_state) {
+global $user;
+    $systems = db_query("SELECT * FROM {fbsubscriber_mailsystem} WHERE uid='" . $user->uid . "'")->fetchAssoc();
+            
+    $form['ac_url'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Activecampaign URL'),
+    '#default_value' => $systems['ac_url'],
+    );
+    
+    $form['ac_api_key'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Activecampaign API Key'),
+    '#default_value' => $systems['ac_api_key'],
+    );
+                    
+    $form['mc_api_key'] = array(
+    '#type' => 'textfield',
+    '#title' => t('MailChimp API Key'),
+    '#default_value' => $systems['mc_api_key'],
+    );
+        
+    $form['submit'] = array(
+        '#type' => 'submit',
+        '#value' => t('Submit'),
+    );      
+    
+    return $form;
+}
+
+function fbsubscriber_mailsystems_form_submit(&$form_state) {
+global $user;
+    $systems = db_query("SELECT * FROM {fbsubscriber_mailsystem} WHERE uid='" . $user->uid . "'")->fetchAssoc();
+    if (isset($systems['uid'])) {
+        db_update('fbsubscriber_mailsystem')
+        ->fields(array(
+        'ac_url' => $form_state['ac_url']['#value'],
+        'ac_api_key' => $form_state['ac_api_key']['#value'],
+        'mc_api_key' => $form_state['mc_api_key']['#value'],
+        ))
+        ->condition('uid',$user->uid,'=')
+        ->execute();
+    } else {
+        db_insert('fbsubscriber_mailsystem')
+        ->fields(array(
+        'uid' => $user->uid,
+        'ac_url' => $form_state['ac_url']['#value'],
+        'ac_api_key' => $form_state['ac_api_key']['#value'],
+        'mc_api_key' => $form_state['mc_api_key']['#value'],
+        ))->execute();
+    }
+    drupal_set_message(t('Your configuration has been saved.'));
+}
+
+function fbsubscriber_form_alter(&$form, &$form_state, $form_id) {
+
+  if ($form_id == 'project_node_form') {
+    //dpm($form);
+    }
+}
+
+
+/**
+ * AJAX-based dropdown example form.
+ *
+ * A form with a dropdown whose options are dependent on a
+ * choice made in a previous dropdown.
+ *
+ * On changing the first dropdown, the options in the second
+ * are updated.
+ */
+function fbsubscriber_example_dependent_dropdown($form, &$form_state) {
+  // Get the list of options to populate the first dropdown.
+  $options_first = _fbsubscriber_example_get_first_dropdown_options();
+  // If we have a value for the first dropdown from $form_state['values'] we use
+  // this both as the default value for the first dropdown and also as a
+  // parameter to pass to the function that retrieves the options for the
+  // second dropdown.
+  $selected = isset($form_state['values']['dropdown_first']) ? $form_state['values']['dropdown_first'] : key($options_first);
+
+  $form['dropdown_first'] = array(
+    '#type' => 'select',
+    '#title' => 'Mailsytem',
+    '#options' => $options_first,
+    '#default_value' => $selected,
+    // Bind an ajax callback to the change event (which is the default for the
+    // select form type) of the first dropdown. It will replace the second
+    // dropdown when rebuilt.
+    '#ajax' => array(
+      // When 'event' occurs, Drupal will perform an ajax request in the
+      // background. Usually the default value is sufficient (eg. change for
+      // select elements), but valid values include any jQuery event,
+      // most notably 'mousedown', 'blur', and 'submit'.
+      // 'event' => 'change',
+      'callback' => 'fbsubscriber_example_dependent_dropdown_callback',
+      'wrapper' => 'dropdown-second-replace',
+    ),
+  );
+
+  $form['dropdown_second'] = array(
+    '#type' => 'select',
+    '#title' => t('List'),
+    // The entire enclosing div created here gets replaced when dropdown_first
+    // is changed.
+    '#prefix' => '<div id="dropdown-second-replace">',
+    '#suffix' => '</div>',
+    // When the form is rebuilt during ajax processing, the $selected variable
+    // will now have the new value and so the options will change.
+    '#options' => _fbsubscriber_example_get_second_dropdown_options($selected),
+    '#default_value' => isset($form_state['values']['dropdown_second']) ? $form_state['values']['dropdown_second'] : '',
+  );
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Submit'),
+  );
+  return $form;
+}
+
+/**
+ * Selects just the second dropdown to be returned for re-rendering.
+ *
+ * Since the controlling logic for populating the form is in the form builder
+ * function, all we do here is select the element and return it to be updated.
+ *
+ * @return array
+ *   Renderable array (the second dropdown)
+ */
+function fbsubscriber_example_dependent_dropdown_callback($form, $form_state) {
+  return $form['dropdown_second'];
+}
+
+/**
+ * Helper function to populate the first dropdown.
+ *
+ * This would normally be pulling data from the database.
+ *
+ * @return array
+ *   Dropdown options.
+ */
+function _fbsubscriber_example_get_first_dropdown_options() {
+  // drupal_map_assoc() just makes an array('String' => 'String'...).
+  return drupal_map_assoc(
+    array(
+      t('Activecampaign'),
+      t('Aweber'),
+      t('GetResponse'),
+      t('Mailchimp'),
+    )
+  );
+}
+
+/**
+ * Helper function to populate the second dropdown.
+ *
+ * This would normally be pulling data from the database.
+ *
+ * @param string $key
+ *   This will determine which set of options is returned.
+ *
+ * @return array
+ *   Dropdown options
+ */
+function _fbsubscriber_example_get_second_dropdown_options($key = '') {
+    switch ($key) {
+        case "Activecampaign":
+            $lists = fbsubscriber_ac_get_lists();
+            break;
+        case "Mailchimp":
+            $lists = fbsubscriber_mc_get_lists();
+            break;
+    }
+  
+  $options = array();
+  foreach($lists as $list) {
+      $options[$list['id']] = $list['name'];
+  }
+
+  if (isset($options)) {
+    return $options;
+  }
+  else {
+    return array();
+  }
 }
